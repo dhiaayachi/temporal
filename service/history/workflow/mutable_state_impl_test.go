@@ -1955,7 +1955,7 @@ func (s *mutableStateSuite) TestCloseTransactionPrepareReplicationTasks_HistoryT
 					return
 				}
 				ms.InsertTasks[tasks.CategoryReplication] = []tasks.Task{}
-				err := ms.closeTransactionPrepareReplicationTasks(TransactionPolicyActive, eventBatches)
+				err := ms.closeTransactionPrepareReplicationTasks(TransactionPolicyActive, eventBatches, false)
 				if err != nil {
 					s.Fail("closeTransactionPrepareReplicationTasks failed", err)
 				}
@@ -2037,12 +2037,15 @@ func (s *mutableStateSuite) TestCloseTransactionPrepareReplicationTasks_SyncHSMT
 
 	testCases := []struct {
 		name                    string
+		hsmEmpty                bool
 		hsmDirty                bool
 		eventBatches            [][]*historypb.HistoryEvent
+		clearBufferEvents       bool
 		expectedReplicationTask tasks.Task
 	}{
 		{
-			name:     "with events",
+			name:     "WithEvents",
+			hsmEmpty: false,
 			hsmDirty: true,
 			eventBatches: [][]*historypb.HistoryEvent{
 				{
@@ -2057,6 +2060,7 @@ func (s *mutableStateSuite) TestCloseTransactionPrepareReplicationTasks_SyncHSMT
 					},
 				},
 			},
+			clearBufferEvents: false,
 			expectedReplicationTask: &tasks.HistoryReplicationTask{
 				WorkflowKey:  s.mutableState.GetWorkflowKey(),
 				FirstEventID: 5,
@@ -2065,16 +2069,46 @@ func (s *mutableStateSuite) TestCloseTransactionPrepareReplicationTasks_SyncHSMT
 			},
 		},
 		{
-			name:     "without events",
-			hsmDirty: true,
+			name:              "NoEvents",
+			hsmEmpty:          false,
+			hsmDirty:          true,
+			eventBatches:      nil,
+			clearBufferEvents: false,
 			expectedReplicationTask: &tasks.SyncHSMTask{
 				WorkflowKey: s.mutableState.GetWorkflowKey(),
 			},
 		},
 		{
-			name:                    "no dirty hsm",
+			name:                    "NoChildren/ClearBufferFalse",
+			hsmEmpty:                true,
 			hsmDirty:                false,
+			eventBatches:            nil,
+			clearBufferEvents:       false,
 			expectedReplicationTask: nil,
+		},
+		{
+			name:                    "NoChildren/ClearBufferTrue",
+			hsmEmpty:                true,
+			hsmDirty:                false,
+			eventBatches:            nil,
+			clearBufferEvents:       true,
+			expectedReplicationTask: nil,
+		},
+		{
+			name:                    "CleanChildren/ClearBufferFalse",
+			hsmEmpty:                false,
+			hsmDirty:                false,
+			clearBufferEvents:       false,
+			expectedReplicationTask: nil,
+		},
+		{
+			name:              "CleanChildren/ClearBufferTrue",
+			hsmEmpty:          false,
+			hsmDirty:          false,
+			clearBufferEvents: true,
+			expectedReplicationTask: &tasks.SyncHSMTask{
+				WorkflowKey: s.mutableState.GetWorkflowKey(),
+			},
 		},
 	}
 
@@ -2082,15 +2116,19 @@ func (s *mutableStateSuite) TestCloseTransactionPrepareReplicationTasks_SyncHSMT
 		s.Run(
 			tc.name,
 			func() {
-				if tc.hsmDirty {
+				if !tc.hsmEmpty {
 					_, err = s.mutableState.HSM().AddChild(
 						hsm.Key{Type: stateMachineDef.Type(), ID: "child_1"},
 						hsmtest.NewData(hsmtest.State1),
 					)
 					s.NoError(err)
+
+					if !tc.hsmDirty {
+						s.mutableState.HSM().ClearTransactionState()
+					}
 				}
 
-				err := s.mutableState.closeTransactionPrepareReplicationTasks(TransactionPolicyActive, tc.eventBatches)
+				err := s.mutableState.closeTransactionPrepareReplicationTasks(TransactionPolicyActive, tc.eventBatches, tc.clearBufferEvents)
 				s.NoError(err)
 
 				repicationTasks := s.mutableState.PopTasks()[tasks.CategoryReplication]
